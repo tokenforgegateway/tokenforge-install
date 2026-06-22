@@ -8,11 +8,23 @@
 #   TF_VERSION   镜像版本,默认 latest  (TF_VERSION=1.2.1 curl ... | sh)
 #   TF_DIR       安装目录,默认 ~/tokenforge-gateway
 #   TF_PORT      监听端口,默认 3080
+#   TF_MIRROR    设为 cn 时用阿里云 ACR 镜像源(国内免翻墙)
 set -e
 
 GHCR_OWNER="tokenforgegateway"
-IMAGE="ghcr.io/${GHCR_OWNER}/tokenforge-gateway"
 VERSION="${TF_VERSION:-latest}"
+
+# ── 镜像源:默认 GHCR(海外);国内 TF_MIRROR=cn 切阿里云 ACR ──────────────────
+if [ "$TF_MIRROR" = "cn" ]; then
+  REGISTRY="${TF_REGISTRY:-crpi-7ojsi5ho45o7q3y9.cn-hangzhou.personal.cr.aliyuncs.com/tokenforge}"
+  PG_IMAGE="${TF_PG_IMAGE:-crpi-7ojsi5ho45o7q3y9.cn-hangzhou.personal.cr.aliyuncs.com/tokenforge/postgres:16-alpine}"
+  REDIS_IMAGE="${TF_REDIS_IMAGE:-crpi-7ojsi5ho45o7q3y9.cn-hangzhou.personal.cr.aliyuncs.com/tokenforge/redis:7-alpine}"
+else
+  REGISTRY="${TF_REGISTRY:-ghcr.io/${GHCR_OWNER}}"
+  PG_IMAGE="${TF_PG_IMAGE:-postgres:16-alpine}"
+  REDIS_IMAGE="${TF_REDIS_IMAGE:-redis:7-alpine}"
+fi
+IMAGE="${REGISTRY}/tokenforge-gateway"
 INSTALL_DIR="${TF_DIR:-$HOME/tokenforge-gateway}"
 PORT="${TF_PORT:-3080}"
 
@@ -69,7 +81,7 @@ cat > docker-compose.yml << 'COMPOSE_EOF'
 name: tokenforge-gateway
 services:
   db:
-    image: postgres:16-alpine
+    image: PG_IMAGE_PLACEHOLDER
     environment:
       POSTGRES_USER: tokenforge
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -84,7 +96,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    image: REDIS_IMAGE_PLACEHOLDER
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 10s
@@ -122,7 +134,10 @@ volumes:
 COMPOSE_EOF
 
 # 把占位符替换为实际镜像(sed -i 在 macOS 和 Linux 写法不同,用临时文件规避)
-sed "s|GATEWAY_IMAGE_PLACEHOLDER|${IMAGE}:${VERSION}|" docker-compose.yml > docker-compose.yml.tmp
+sed -e "s|GATEWAY_IMAGE_PLACEHOLDER|${IMAGE}:${VERSION}|" \
+    -e "s|PG_IMAGE_PLACEHOLDER|${PG_IMAGE}|" \
+    -e "s|REDIS_IMAGE_PLACEHOLDER|${REDIS_IMAGE}|" \
+    docker-compose.yml > docker-compose.yml.tmp
 mv docker-compose.yml.tmp docker-compose.yml
 ok "docker-compose.yml 已就绪"
 

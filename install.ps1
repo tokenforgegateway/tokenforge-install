@@ -7,6 +7,7 @@
 #   $env:TF_VERSION   镜像版本，默认 latest
 #   $env:TF_DIR       安装目录，默认 $HOME\tokenforge-gateway
 #   $env:TF_PORT      监听端口，默认 3080
+#   $env:TF_MIRROR    设为 cn 时用阿里云 ACR 镜像源(国内免翻墙)
 #
 # 依赖: Docker Desktop for Windows (https://docs.docker.com/desktop/install/windows-install/)
 [CmdletBinding()]
@@ -15,7 +16,18 @@ $ErrorActionPreference = 'Stop'
 
 $GhcrOwner = 'tokenforgegateway'
 $Version   = if ($env:TF_VERSION) { $env:TF_VERSION } else { 'latest' }
-$Image     = "ghcr.io/$GhcrOwner/tokenforge-gateway:$Version"
+
+# 镜像源:默认 GHCR(海外);国内 $env:TF_MIRROR=cn 切阿里云 ACR
+if ($env:TF_MIRROR -eq 'cn') {
+  $Registry  = if ($env:TF_REGISTRY)  { $env:TF_REGISTRY }  else { 'crpi-7ojsi5ho45o7q3y9.cn-hangzhou.personal.cr.aliyuncs.com/tokenforge' }
+  $PgImage   = if ($env:TF_PG_IMAGE)  { $env:TF_PG_IMAGE }  else { 'crpi-7ojsi5ho45o7q3y9.cn-hangzhou.personal.cr.aliyuncs.com/tokenforge/postgres:16-alpine' }
+  $RedisImage= if ($env:TF_REDIS_IMAGE){ $env:TF_REDIS_IMAGE }else { 'crpi-7ojsi5ho45o7q3y9.cn-hangzhou.personal.cr.aliyuncs.com/tokenforge/redis:7-alpine' }
+} else {
+  $Registry  = if ($env:TF_REGISTRY)  { $env:TF_REGISTRY }  else { "ghcr.io/$GhcrOwner" }
+  $PgImage   = if ($env:TF_PG_IMAGE)  { $env:TF_PG_IMAGE }  else { 'postgres:16-alpine' }
+  $RedisImage= if ($env:TF_REDIS_IMAGE){ $env:TF_REDIS_IMAGE }else { 'redis:7-alpine' }
+}
+$Image     = "$Registry/tokenforge-gateway:$Version"
 $InstallDir = if ($env:TF_DIR) { $env:TF_DIR } else { Join-Path $HOME 'tokenforge-gateway' }
 $Port      = if ($env:TF_PORT)    { $env:TF_PORT }    else { '3080' }
 
@@ -65,7 +77,7 @@ $composeContent = @"
 name: tokenforge-gateway
 services:
   db:
-    image: postgres:16-alpine
+    image: $PgImage
     environment:
       POSTGRES_USER: tokenforge
       POSTGRES_PASSWORD: `${POSTGRES_PASSWORD}
@@ -80,7 +92,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    image: $RedisImage
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 10s
