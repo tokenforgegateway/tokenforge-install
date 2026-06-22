@@ -121,6 +121,9 @@ services:
       - TF_LICENSE_KEY=${TF_LICENSE_KEY}
       - TF_SESSION_SECRET=${TF_SESSION_SECRET}
       - TF_LOG_LEVEL=${TF_LOG_LEVEL:-info}
+      # 序列码激活:经 tokenforge-server 注册握手(置 0 则本地激活、无需序列码)
+      - TOKENFORGE_SERVER_ENABLED=${TOKENFORGE_SERVER_ENABLED:-1}
+      - TOKENFORGE_SERVER_URL=${TOKENFORGE_SERVER_URL:-https://tokenforge.tokgoai.com}
     healthcheck:
       test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3080/healthz']
       interval: 30s
@@ -154,6 +157,8 @@ DATABASE_URL=postgres://tokenforge:$PG_PW@db:5432/tokenforge
 TF_LICENSE_KEY=$(gen32)
 TF_SESSION_SECRET=$(gen32)
 TF_PORT=$PORT
+TOKENFORGE_SERVER_ENABLED=${TOKENFORGE_SERVER_ENABLED:-1}
+TOKENFORGE_SERVER_URL=${TOKENFORGE_SERVER_URL:-https://tokenforge.tokgoai.com}
 ENV_EOF
   ok "密钥已生成(.env)"
   warn "请备份 .env 文件!丢失后数据库加密数据将永久无法恢复。"
