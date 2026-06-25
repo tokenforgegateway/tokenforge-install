@@ -141,10 +141,13 @@ Write-Ok "docker-compose.yml 已就绪"
 
 # ── 生成 .env(幂等:已存在则复用，不改密) ─────────────────────────────────────
 function New-Secret {
+  # Windows PowerShell 5.1(.NET Framework)没有静态 Fill 方法，用实例 GetBytes 兼容
+  $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
   $bytes = [byte[]]::new(48)
-  [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+  $rng.GetBytes($bytes)
   # base64 后只保留字母数字，取前 43 位
-  return [Convert]::ToBase64String($bytes) -replace '[^A-Za-z0-9]','' | ForEach-Object { $_.Substring(0, [Math]::Min(43, $_.Length)) }
+  $s = [Convert]::ToBase64String($bytes) -replace '[^A-Za-z0-9]',''
+  return $s.Substring(0, [Math]::Min(43, $s.Length))
 }
 
 $envFile = Join-Path $InstallDir '.env'
