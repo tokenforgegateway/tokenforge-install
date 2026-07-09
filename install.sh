@@ -14,7 +14,7 @@
 set -e
 
 GHCR_OWNER="tokenforgegateway"
-VERSION="${TF_VERSION:-latest}"
+VERSION="${TF_VERSION:-1.3.0}"
 
 # ── 镜像源:默认 GHCR(海外);国内 TF_MIRROR=cn 切阿里云 ACR ──────────────────
 if [ "$TF_MIRROR" = "cn" ]; then
@@ -27,6 +27,7 @@ else
   REDIS_IMAGE="${TF_REDIS_IMAGE:-redis:7-alpine}"
 fi
 IMAGE="${REGISTRY}/tokenforge-gateway"
+OTA_IMAGE="${IMAGE}-ota"
 INSTALL_DIR="${TF_DIR:-$HOME/tokenforge-gateway}"
 PORT="${TF_PORT:-3080}"
 BIND="${TF_BIND:-0.0.0.0}"
@@ -66,6 +67,7 @@ cd "$INSTALL_DIR"
 echo ""
 step "安装目录: $INSTALL_DIR"
 step "镜像: ${IMAGE}:${VERSION} (${PLATFORM})"
+step "OTA sidecar: ${OTA_IMAGE}:${VERSION} (${PLATFORM})"
 echo ""
 
 # ── 拉取镜像 ─────────────────────────────────────────────────────────────────
@@ -73,6 +75,10 @@ step "拉取镜像..."
 if ! docker pull --platform "$PLATFORM" "${IMAGE}:${VERSION}"; then
   echo ""
   die "镜像拉取失败。请确认镜像已设为 Public，或联系 TokenForge 获取访问权限。"
+fi
+if ! docker pull --platform "$PLATFORM" "${OTA_IMAGE}:${VERSION}"; then
+  echo ""
+  die "OTA sidecar 镜像拉取失败。请确认镜像已设为 Public，或联系 TokenForge 获取访问权限。"
 fi
 ok "镜像已就绪"
 
@@ -108,7 +114,7 @@ services:
     restart: unless-stopped
 
   tokenforge:
-    image: GATEWAY_IMAGE_PLACEHOLDER
+    image: ${GATEWAY_IMAGE_REPO}:${GATEWAY_VERSION}
     depends_on:
       db:
         condition: service_healthy
@@ -134,6 +140,9 @@ services:
       - TF_PUBLIC_BASE_URL=${TF_PUBLIC_BASE_URL:-}
       - TF_ADVERTISE_IPS=${TF_ADVERTISE_IPS:-}
       - TF_ADVERTISE_PORT=${TF_ADVERTISE_PORT:-${TF_PORT:-3080}}
+      - TF_OTA_DIR=/otastate
+    volumes:
+      - otastate:/otastate
     healthcheck:
       test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3080/healthz']
       interval: 30s
@@ -142,13 +151,30 @@ services:
       retries: 3
     restart: unless-stopped
 
+  ota-updater:
+    image: ${GATEWAY_OTA_IMAGE_REPO}:${GATEWAY_VERSION}
+    depends_on:
+      tokenforge:
+        condition: service_started
+    environment:
+      - TF_OTA_DIR=/otastate
+      - TF_OTA_INTERVAL=${TF_OTA_INTERVAL:-30}
+      - TF_OTA_HEALTH_URL=http://tokenforge:3080/healthz
+      - TF_OTA_HEALTH_TIMEOUT=${TF_OTA_HEALTH_TIMEOUT:-60}
+      - COMPOSE_PROJECT_DIR=/compose
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - otastate:/otastate
+      - ./:/compose
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  otastate:
 COMPOSE_EOF
 
 # 把占位符替换为实际镜像(sed -i 在 macOS 和 Linux 写法不同,用临时文件规避)
-sed -e "s|GATEWAY_IMAGE_PLACEHOLDER|${IMAGE}:${VERSION}|" \
-    -e "s|PG_IMAGE_PLACEHOLDER|${PG_IMAGE}|" \
+sed -e "s|PG_IMAGE_PLACEHOLDER|${PG_IMAGE}|" \
     -e "s|REDIS_IMAGE_PLACEHOLDER|${REDIS_IMAGE}|" \
     docker-compose.yml > docker-compose.yml.tmp
 mv docker-compose.yml.tmp docker-compose.yml
@@ -156,6 +182,15 @@ ok "docker-compose.yml 已就绪"
 
 # ── 生成 .env(幂等:已存在则复用,不改密) ─────────────────────────────────────
 gen32() { head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 43; }
+
+set_env_line() {
+  key="$1"; value="$2"
+  if grep -q "^${key}=" .env 2>/dev/null; then
+    sed "s#^${key}=.*#${key}=${value}#" .env > .env.new && cat .env.new > .env && rm -f .env.new
+  else
+    printf '%s=%s\n' "$key" "$value" >> .env
+  fi
+}
 
 if [ ! -f .env ]; then
   step "生成随机密钥..."
@@ -169,6 +204,11 @@ TF_SESSION_SECRET=$(gen32)
 GATEWAY_KEY_MASTER=$(gen32)
 TF_PORT=$PORT
 TF_BIND=$BIND
+GATEWAY_IMAGE_REPO=$IMAGE
+GATEWAY_OTA_IMAGE_REPO=$OTA_IMAGE
+GATEWAY_VERSION=$VERSION
+TF_OTA_INTERVAL=${TF_OTA_INTERVAL:-30}
+TF_OTA_HEALTH_TIMEOUT=${TF_OTA_HEALTH_TIMEOUT:-60}
 TOKENFORGE_SERVER_ENABLED=${TOKENFORGE_SERVER_ENABLED:-1}
 TOKENFORGE_SERVER_URL=${TOKENFORGE_SERVER_URL:-https://tokenforge.tokgoai.com}
 ENV_EOF
@@ -188,6 +228,12 @@ else
     ok "已补全 TF_BIND=$BIND(升级后局域网可访问)"
   fi
 fi
+
+set_env_line GATEWAY_IMAGE_REPO "$IMAGE"
+set_env_line GATEWAY_OTA_IMAGE_REPO "$OTA_IMAGE"
+set_env_line GATEWAY_VERSION "$VERSION"
+set_env_line TF_OTA_INTERVAL "${TF_OTA_INTERVAL:-30}"
+set_env_line TF_OTA_HEALTH_TIMEOUT "${TF_OTA_HEALTH_TIMEOUT:-60}"
 
 # ── 枚举宿主网卡 IP,注入 TF_ADVERTISE_IPS(ADR 0047)──────────────────────────
 # 过滤 docker 网桥/回环;容器内看不到宿主网卡,必须在宿主枚举后注入。IP 可能变,每次刷新。

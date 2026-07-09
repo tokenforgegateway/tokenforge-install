@@ -16,7 +16,7 @@ param()
 $ErrorActionPreference = 'Stop'
 
 $GhcrOwner = 'tokenforgegateway'
-$Version   = if ($env:TF_VERSION) { $env:TF_VERSION } else { 'latest' }
+$Version   = if ($env:TF_VERSION) { $env:TF_VERSION } else { '1.3.0' }
 
 # 镜像源:默认 GHCR(海外);国内 $env:TF_MIRROR=cn 切阿里云 ACR
 if ($env:TF_MIRROR -eq 'cn') {
@@ -28,7 +28,10 @@ if ($env:TF_MIRROR -eq 'cn') {
   $PgImage   = if ($env:TF_PG_IMAGE)  { $env:TF_PG_IMAGE }  else { 'postgres:16-alpine' }
   $RedisImage= if ($env:TF_REDIS_IMAGE){ $env:TF_REDIS_IMAGE }else { 'redis:7-alpine' }
 }
-$Image     = "$Registry/tokenforge-gateway:$Version"
+$ImageRepo = "$Registry/tokenforge-gateway"
+$OtaImageRepo = "$Registry/tokenforge-gateway-ota"
+$Image = "${ImageRepo}:$Version"
+$OtaImage = "${OtaImageRepo}:$Version"
 $InstallDir = if ($env:TF_DIR) { $env:TF_DIR } else { Join-Path $HOME 'tokenforge-gateway' }
 $Port      = if ($env:TF_PORT)    { $env:TF_PORT }    else { '3080' }
 $Bind      = if ($env:TF_BIND)    { $env:TF_BIND }    else { '0.0.0.0' }
@@ -60,6 +63,7 @@ Set-Location $InstallDir
 Write-Host ""
 Write-Step "安装目录: $InstallDir"
 Write-Step "镜像: $Image ($Platform)"
+Write-Step "OTA sidecar: $OtaImage ($Platform)"
 Write-Host ""
 
 # ── 拉取镜像 ──────────────────────────────────────────────────────────────────
@@ -68,6 +72,11 @@ $pullResult = docker pull --platform $Platform $Image 2>&1
 if ($LASTEXITCODE -ne 0) {
   Write-Host $pullResult
   Write-Fail "镜像拉取失败。请确认镜像已设为 Public，或联系 TokenForge 获取访问权限。"
+}
+$pullOtaResult = docker pull --platform $Platform $OtaImage 2>&1
+if ($LASTEXITCODE -ne 0) {
+  Write-Host $pullOtaResult
+  Write-Fail "OTA sidecar 镜像拉取失败。请确认镜像已设为 Public，或联系 TokenForge 获取访问权限。"
 }
 Write-Ok "镜像已就绪"
 
@@ -103,7 +112,7 @@ services:
     restart: unless-stopped
 
   tokenforge:
-    image: $Image
+    image: `${GATEWAY_IMAGE_REPO}:`${GATEWAY_VERSION}
     depends_on:
       db:
         condition: service_healthy
@@ -129,6 +138,9 @@ services:
       - TF_PUBLIC_BASE_URL=`${TF_PUBLIC_BASE_URL:-}
       - TF_ADVERTISE_IPS=`${TF_ADVERTISE_IPS:-}
       - TF_ADVERTISE_PORT=`${TF_ADVERTISE_PORT:-`${TF_PORT:-3080}}
+      - TF_OTA_DIR=/otastate
+    volumes:
+      - otastate:/otastate
     healthcheck:
       test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3080/healthz']
       interval: 30s
@@ -137,8 +149,26 @@ services:
       retries: 3
     restart: unless-stopped
 
+  ota-updater:
+    image: `${GATEWAY_OTA_IMAGE_REPO}:`${GATEWAY_VERSION}
+    depends_on:
+      tokenforge:
+        condition: service_started
+    environment:
+      - TF_OTA_DIR=/otastate
+      - TF_OTA_INTERVAL=`${TF_OTA_INTERVAL:-30}
+      - TF_OTA_HEALTH_URL=http://tokenforge:3080/healthz
+      - TF_OTA_HEALTH_TIMEOUT=`${TF_OTA_HEALTH_TIMEOUT:-60}
+      - COMPOSE_PROJECT_DIR=/compose
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - otastate:/otastate
+      - ./:/compose
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  otastate:
 "@
 # 用 UTF-8(无 BOM)写入，避免 docker compose 解析失败
 [System.IO.File]::WriteAllText(
@@ -160,6 +190,16 @@ function New-Secret {
 }
 
 $envFile = Join-Path $InstallDir '.env'
+function Set-EnvLine {
+  param([string]$Key, [string]$Value)
+  $lines = @()
+  if (Test-Path $envFile) {
+    $lines = @(Get-Content $envFile | Where-Object { $_ -notmatch "^$([regex]::Escape($Key))=" })
+  }
+  $lines += "$Key=$Value"
+  Set-Content -Path $envFile -Value $lines
+}
+
 if (-not (Test-Path $envFile)) {
   Write-Step "生成随机密钥..."
   $pgPw = New-Secret
@@ -171,6 +211,11 @@ TF_SESSION_SECRET=$(New-Secret)
 GATEWAY_KEY_MASTER=$(New-Secret)
 TF_PORT=$Port
 TF_BIND=$Bind
+GATEWAY_IMAGE_REPO=$ImageRepo
+GATEWAY_OTA_IMAGE_REPO=$OtaImageRepo
+GATEWAY_VERSION=$Version
+TF_OTA_INTERVAL=30
+TF_OTA_HEALTH_TIMEOUT=60
 TOKENFORGE_SERVER_ENABLED=1
 TOKENFORGE_SERVER_URL=https://tokenforge.tokgoai.com
 "@
@@ -190,6 +235,12 @@ TOKENFORGE_SERVER_URL=https://tokenforge.tokgoai.com
     Write-Ok "已补全 TF_BIND=$Bind(升级后局域网可访问)"
   }
 }
+
+Set-EnvLine 'GATEWAY_IMAGE_REPO' $ImageRepo
+Set-EnvLine 'GATEWAY_OTA_IMAGE_REPO' $OtaImageRepo
+Set-EnvLine 'GATEWAY_VERSION' $Version
+Set-EnvLine 'TF_OTA_INTERVAL' '30'
+Set-EnvLine 'TF_OTA_HEALTH_TIMEOUT' '60'
 
 # ── 枚举宿主网卡 IP,注入 TF_ADVERTISE_IPS(ADR 0047)──────────────────────────
 # 过滤 docker/WSL 虚拟网卡与回环;容器内看不到宿主网卡,必须在宿主枚举后注入。
